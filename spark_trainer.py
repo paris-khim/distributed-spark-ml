@@ -1,30 +1,50 @@
 from pyspark.sql import SparkSession
 from pyspark.ml import Pipeline
-from pyspark.ml.classification import RandomForestClassifier
-from pyspark.ml.feature import StringIndexer, VectorAssembler, StandardScaler
+from pyspark.ml.classification import GBTClassifier
+from pyspark.ml.feature import VectorAssembler, StandardScaler, StringIndexer
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
 
-class DistributedMLTrainer:
-    def __init__(self, app_name="SparkMLTrainer"):
-        self.spark = SparkSession.builder.appName(app_name).getOrCreate()
+class EnterpriseMLOps:
+    """Scalable ML training and evaluation on distributed infrastructure."""
+    
+    def __init__(self):
+        self.spark = SparkSession.builder.appName("EnterpriseMLOps").getOrCreate()
+        self.evaluator = BinaryClassificationEvaluator(metricName="areaUnderROC")
 
-    def train_classifier(self, data_path, label_col="target"):
-        """Train a distributed Random Forest model on S3/Parquet data."""
-        df = self.spark.read.parquet(data_path)
+    def train_with_tuning(self, data_path: str, label_col: str):
+        """Train Gradient Boosted Trees with Cross-Validation."""
+        data = self.spark.read.parquet(data_path)
         
-        # Feature Engineering
-        feature_cols = [c for c in df.columns if c != label_col]
-        assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
-        scaler = StandardScaler(inputCol="features", outputCol="scaled_features")
+        # Data Pipeline
+        indexer = StringIndexer(inputCol=label_col, outputCol="label")
+        assembler = VectorAssembler(inputCols=[c for c in data.columns if c != label_col], outputCol="features")
+        scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures")
         
-        # Model Definition
-        rf = RandomForestClassifier(labelCol=label_col, featuresCol="scaled_features", numTrees=100)
+        gbt = GBTClassifier(labelCol="label", featuresCol="scaledFeatures", maxIter=20)
+        pipeline = Pipeline(stages=[indexer, assembler, scaler, gbt])
+
+        # Hyperparameter Grid
+        paramGrid = ParamGridBuilder() \
+            .addGrid(gbt.maxDepth, [5, 10]) \
+            .addGrid(gbt.stepSize, [0.01, 0.1]) \
+            .build()
+
+        cv = CrossValidator(estimator=pipeline,
+                           estimatorParamMaps=paramGrid,
+                           evaluator=self.evaluator,
+                           numFolds=3)
+
+        print("Starting distributed hyperparameter tuning...")
+        cvModel = cv.fit(data)
         
-        # Pipeline Execution
-        pipeline = Pipeline(stages=[assembler, scaler, rf])
-        model = pipeline.fit(df)
+        # Best model results
+        results = cvModel.transform(data)
+        auc = self.evaluator.evaluate(results)
+        print(f"Training Complete. Best Model AUC: {auc:.4f}")
         
-        return model
+        return cvModel.bestModel
 
 if __name__ == "__main__":
-    trainer = DistributedMLTrainer()
-    print("Distributed Spark ML trainer ready.")
+    mlops = EnterpriseMLOps()
+    print("Spark MLOps trainer ready for big data workloads.")
